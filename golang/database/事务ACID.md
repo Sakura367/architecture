@@ -19,7 +19,22 @@ DQL(data query language)数据查询语言。常用的命令有：select，order
 - binlog日志由MySQL的Server层实现，无关数据库引擎，是逻辑日志
 
 ### 事务执行过程
-https://blog.csdn.net/weixin_51261234/article/details/124908426
+1. 先将原始数据从磁盘中读入内存中
+2. 生成一条修改数据语句的反向操作日志到undo log
+3. 修改数据的内存拷贝
+4. 生成一条重做日志并写入redo log buffer，记录的是数据被修改后的值
+，并将该条 redo log 的状态标记为 prepare 状态
+5. 接着存储引擎告诉执行器，可以提交事务了。执行器接到通知后，会写 binlog 日志，然后提交事务
+6. 存储引擎接到提交事务的通知后，将 redo log 的日志状态标记为 commit 状态
+7. 当事务commit时，将redo log buffer中的内容刷新到 redo log file，对 redo log file采用追加写的方式
+8. 根据需要删除undo log日志
+9. 定期将内存中修改的数据刷新到磁盘中
+
+**undo log的删除**
+- 针对于insert undo log
+insert操作的记录，只对事务本身可见，对其他事务不可见。故该undo log可以在事务提交后直接删除，不需要进行purge操作。
+- 针对于update undo log
+undo log可能需要提供MVCC机制，因此不能在事务提交时就进行删除。提交时放入undo log链表，等待purge线程进行最后的删除。
 
 ### MySQL宕机处理
 #### redo log
@@ -104,6 +119,66 @@ C. 到这里，还有一个问题没有弄清楚。既然Redo没有事务性，�
 
 综合来看，redo log 机制的引入，在提高 MySQL 性能的同时，也保证了数据的可靠性。
 
+#### binlog与redolog必要性
+**有了redo log，为啥还需要binlog呢？**
+1. redo log的大小是固定的，采用"循环滚动写"的方式记录log，日志上的记录修改落盘后，日志会被覆盖掉，无法用于全量数据的 "回滚/恢复"等操作。
+2. redo log是innodb引擎层实现的，并不是所有引擎都有。
+
+**有了binlog，为啥还需要redo log呢？**
+1. redo log是从事务开始后逐步写入磁盘的，用于故障时，恢复已提交但未及时落盘写入数据盘的脏页数据（落盘的步骤是先从磁盘中把相关数据页读到内存中，然后更新内存中的数据页，更新后的内存数据页属于脏页【当前内存中的数据与磁盘中不一致】，之后脏页中的数据会被写入磁盘，称为刷脏页）；而 binlog是二进制日志，只有在事务即将提交时才写入（比如突然宕机了），因此没有保存脏页数据，并没有能力在数据库崩溃后恢复完整数据页（丢失部分未写入磁盘的数据）
+2. 数据文件的检查点是由redolog的checkPoint记录的，大致可认为checkPoint之前的数据已经刷盘了，checkPoint之后的数据还没有刷盘，所以在数据库crash之后，redolog能够知道该从什么位置进行回放redolog日志进行恢复，而binlog却做不到
+
 ### MVCC
 https://xie.infoq.cn/article/eff93ec47b54a5069e0bd1726
-InnoDB在每行数据都增加三个隐藏字段，一个唯一行号（DB_ROW_ID），一个记录创建的版本号（DB_TRX_ID），一个记录回滚的版本号（DB_ROLL_PTR）。
+
+快照读：简单的select操作，属于快照读，不加锁。
+select * from table where ?;
+
+当前读：特殊的读操作，插入/更新/删除操作，属于当前读，需要加锁。
+select * from table where ? lock in share mode;
+select * from table where ? for update;
+insert into table values (…);
+update table set ? where ?;
+delete from table where ?;
+
+**在快照读情况下，mysql通过mvcc来避免幻读。
+在当前读情况下，mysql通过next-key来避免幻读。**
+
+#### 隐式字段
+InnoDB在每行数据都增加三个隐藏字段
+- 唯一行号（DB_ROW_ID）
+- 记录创建的版本号（DB_TRX_ID）
+- 记录回滚的版本号（DB_ROLL_PTR）
+
+#### undo log
+undo log 细分为两种，insert 时产生的 undo log、update，delete 时产生的 undo log
+- 在 Innodb 中 insert 产生的 undo log 在提交事务之后就会被删除，因为新插入的数据没有历史版本，所以无需维护 undo log。
+- update 和 delete 操作产生的 undo log 都属于一种类型，在事务回滚时需要，而且在快照读时也需要，则需要维护多个版本信息。只有在快照读和事务回滚不涉及该日志时，对应的日志才会被purge线程统一删除。purge 线程会清理 undo log 的历史版本，同样也会清理 del  flag 标记的记录。
+
+undo log 保存的是一个版本链，也就是使用 DB_ROLL_PTR 这个字段来连接的。
+
+#### Read View
+当执行 SQL 语句查询时会产生一致性视图，也就是 read-view，它是由查询的那一时间所有未提交事务 ID 组成的数组，和已经创建的最大事务 ID 组成的。
+
+Read View 有四个重要的字段：
+- m_ids ：指的是创建 Read View 时当前数据库中活跃且未提交的事务的事务 id 列表，注意是一个列表。
+- min_trx_id ：指的是创建 Read View 时当前数据库中活跃且未提交的事务中最小事务的事务 id，也就是 m_ids 的最小值。
+- max_trx_id ：这个并不是 m_ids 的最大值，而是创建 Read View 时当前数据库中应该给下一个事务的 id 值；
+- creator_trx_id ：指的是创建该 Read View 的事务的事务 id。
+
+#### 版本链对比规则
+1. 数据行的 trx_id < min_trx_id，表示此版本是已经提交的事务生成的，由于事务已经提交所以数据是可见的
+2. 数据行的 trx_id > max_trx_id，表示此版本是由将来启动的事务生成的，是肯定不可见的
+3. 若在 min_trx_id <= trx_id <= max_trx_id 时
+    1. 数据行的 的 trx_id 在 m_ids 数组中，表示此版本是由还没提交的事务生成的，不可见，但是当前自己的事务是可见的
+    2. 数据行的 的 trx_id 不在 m_ids 数组中，表明是提交的事务生成了该版本，可见
+
+还有一个特殊情况那就是对于已经删除的数据，在之前的 undo log 日志讲述时说了 update 和 delete 是同一种类型的 undo log，同样也可以认为 delete 就是 update 的特殊情况。
+
+当删除一条数据时会将版本链上最新的数据复制一份，然后将 creator_trx_id 修改为删除时的 creator_trx_id delete flag 标记，将这个标记写上 true，用来表示当前记录已经删除。
+
+在查询时按照版本链的规则查询到对应的记录，如果 delete flag 标记位为 true，意味着数据已经被删除，则不返回数据。
+
+#### 读已提交与可重复读的Read View区别
+- 读已提交隔离级别是在每个 select 都会生成一个新的 Read View，也意味着，事务期间的多次读取同一条数据，前后两次读的数据可能会出现不一致，因为可能这期间另外一个事务修改了该记录，并提交了事务。
+- 可重复读隔离级别是启动事务时生成一个 Read View，然后整个事务期间都在用这个 Read View，这样就保证了在事务期间读到的数据都是事务启动前的记录。

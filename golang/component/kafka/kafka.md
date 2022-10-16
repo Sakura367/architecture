@@ -46,12 +46,12 @@ Consumer Group与Consumer的关系是动态维护的：
 ### Coordinator
 Coordinator 协调者，协调consumer、broker。早期版本中Coordinator，使用zookeeper实现，但是这样做，rebalance的负担太重。为了解决scalable的问题，不再使用zookeeper，而是让每个broker来负责一些group的管理，这样consumer就完全不再依赖zookeeper了。
 
-##### Consumer连接到coordinator
+#### Consumer连接到coordinator
 从Consumer的实现来看，在执行poll或者是join group之前，都要保证已连接到Coordinator。连接到coordinator的过程是：
 1. 连接到最后一次连接的broker（如果是刚启动的consumer，则要根据配置中的borker）。它会响应一个包含coordinator信息(host, port等)的response。
 2. 连接到coordinator。
 
-##### Consumer Group Management
+#### Consumer Group Management
 Consumer Group 管理中，也是需要coordinator的参与。一个Consumer要join到一个group中，或者一个consumer退出时，都要进行rebalance。进行rebalance的流程是：
 1. 会给一个coordinator发起Join请求（请求中要包括自己的一些元数据，例如自己感兴趣的topics）
 2. Coordinator 根据这些consumer的join请求，选择出一个leader，并通知给各个consumer。这里的leader是consumer group 内的leader，是由某个consumer担任，不要与partition的leader混淆。
@@ -71,12 +71,12 @@ Kafka通过多副本机制实现故障自动转移，当Kafka集群中一个brok
 
 消息复制延迟受最慢的follower限制，需要快速检测慢副本，如果follower“落后”太多或者失效，leader将会把它从ISR中删除。
 
-##### SR
+#### SR
 分区中的所有副本统称为AR（Assigned Repllicas）。所有与leader副本保持一定程度同步的副本（包括Leader）组成ISR（In-Sync Replicas），ISR集合是AR集合中的一个子集。消息会先发送到leader副本，然后follower副本才能从leader副本中拉取消息进行同步，同步期间内follower副本相对于leader副本而言会有一定程度的滞后。前面所说的“一定程度”是指可以忍受的滞后范围，这个范围可以通过参数进行配置。与leader副本同步滞后过多的副本（不包括leader）副本，组成OSR(Out-Sync Relipcas),由此可见：AR=ISR+OSR。在正常情况下，所有的follower副本都应该与leader副本保持一定程度的同步，即AR=ISR,OSR集合为空。
 
 Leader副本负责维护和跟踪ISR集合中所有的follower副本的滞后状态，当follower副本落后太多或者失效时，leader副本会把它从ISR集合中剔除。如果OSR集合中follower副本“追上”了Leader副本，之后再ISR集合中的副本才有资格被选举为leader，而在OSR集合中的副本则没有机会（这个原则可以通过修改对应的参数配置来改变）
 
-##### LEO和HW
+#### LEO和HW
 每个Kafka副本对象都有两个重要的属性：LEO和HW。注意是所有的副本，而不只是leader副本。
 
 LEO：即日志末端位移(log end offset)，记录了该副本底层日志(log)中下一条消息的位移值。注意是下一条消息！也就是说，如果LEO=10，那么表示该副本保存了10条消息，位移值范围是[0, 9]。
@@ -91,14 +91,14 @@ HW：对于同一个副本对象而言，其HW值不会大于LEO值。小于等�
 - Customer 从 Broker 读取数据，采用 sendfile，将磁盘文件读到 OS 内核缓冲区后，直接转到 socket buffer 进行网络发送。
 - Broker 性能优化：日志记录批处理、批量压缩、非强制刷新缓冲写操作等。
 - 流数据并行
-##### 数据顺序写入日志文件
+#### 数据顺序写入日志文件
 Kafka 利用了一种分段式的、只追加 (Append-Only) 的日志，基本上把自身的读写操作限制为顺序 I/O，也就使得它在各种存储介质上能有很快的速度。
 
 这种方法采用了只读设计 ，所以 Kafka 是不会修改、删除数据的，它会把所有的数据都保留下来，每个消费者（Consumer）对每个 Topic 都有一个 offset 用来表示读取到了第几条数据。
 
 磁盘的顺序读写是磁盘使用模式中最有规律的，并且操作系统也对这种模式做了大量优化，Kafka 就是使用了磁盘顺序读写来提升的性能。Kafka 的 message 是不断追加到本地磁盘文件末尾的，而不是随机的写入，这使得 Kafka 写入吞吐量得到了显著提升。
 
-##### 使用mmap映射文件
+#### 使用mmap映射文件
 简称 mmap，简单描述其作用就是：将磁盘文件映射到内存，用户通过修改内存就能修改磁盘文件。
 
 它的工作原理是直接利用操作系统的 Page 来实现磁盘文件到物理内存的直接映射。完成映射之后你对物理内存的操作会被同步到硬盘上（操作系统在适当的时候）。
@@ -111,10 +111,49 @@ Kafka 提供了一个参数 producer.type 来控制是不是主动 flush：
 1. 如果 Kafka 写入到 mmap 之后就立即 flush，然后再返回 Producer 叫同步（sync）;
 2. 写入 mmap 之后立即返回 Producer 不调用 flush 叫异步（async）。
 
-##### 零拷贝
-https://blog.csdn.net/jiang_wang01/article/details/123238018
+#### 零拷贝
+服务端提供文件传输功能的方式是：将磁盘上的文件读取出来，然后通过网络协议发送给客户端。
 
-##### Broker性能
+##### 传统IO方式
+数据读取和写入是从用户空间到内核空间来回复制，而内核空间的数据是通过操作系统层面的 I/O 接口从磁盘读取或写入。
+
+期间共发生了 4 次用户态与内核态的上下文切换，因为发生了两次系统调用，一次是 read() ，一次是 write()，每次系统调用都得先从用户态切换到内核态，等内核完成任务后，再从内核态切换回用户态。
+
+还发生了 4 次数据拷贝，其中两次是 DMA 的拷贝，另外两次则是通过 CPU 拷贝的。
+- 第一次拷贝，把磁盘上的数据拷贝到操作系统内核的缓冲区里，这个拷贝的过程是通过 DMA 搬运的。
+- 第二次拷贝，把内核缓冲区的数据拷贝到用户的缓冲区里，于是我们应用程序就可以使用这部分数据了，这个拷贝到过程是由 CPU 完成的。
+- 第三次拷贝，把刚才拷贝到用户的缓冲区里的数据，再拷贝到内核的 socket 的缓冲区里，这个过程依然还是由 CPU 搬运的。
+- 第四次拷贝，把内核的 socket 缓冲区里的数据，拷贝到网卡的缓冲区里，这个过程又是由 DMA 搬运的。
+
+##### mmap/write 方式
+使用mmap/write方式替换原来的传统I/O方式，利用了虚拟内存的特性。
+
+把数据读取到内核缓冲区后，应用程序进行写入操作时，直接把内核的Read Buffer的数据复制到Socket Buffer以便写入，这次内核之间的复制也是需要CPU的参与的。
+
+上述流程就是少了一个 CPU COPY，提升了 I/O 的速度。不过发现上下文的切换还是4次并没有减少，这是因为还是要应用程序发起write操作。
+
+##### sendfile 方式
+从 Linux 2.1 版本开始，Linux 引入了 sendfile来简化操作。sendfile方式可以替换上面的mmap/write方式来进一步优化。
+```
+mmap();
+write();
+替换为：
+sendfile();
+减少了上下文切换，因为少了一个应用程序发起write操作，直接发起sendfile操作。
+```
+只有三次数据复制（其中只有一次 CPU COPY）以及2次上下文切换。
+
+##### 带有 scatter/gather 的 sendfile方式
+Linux 2.4 内核进行了优化，提供了带有 scatter/gather 的 sendfile 操作，这个操作可以把最后一次 CPU COPY 去除。其原理就是在内核空间 Read Buffer 和 Socket Buffer 不做数据复制，而是将 Read Buffer 的内存地址、偏移量记录到相应的 Socket Buffer 中，这样就不需要复制。其本质和虚拟内存的解决方法思路一致，就是内存地址的记录。
+
+scatter/gather 的 sendfile 只有两次数据复制（都是 DMA COPY）及 2 次上下文切换。CUP COPY 已经完全没有。不过这一种收集复制功能是需要硬件及驱动程序支持的。
+
+##### splice 方式
+splice 调用和sendfile 非常相似，用户应用程序必须拥有两个已经打开的文件描述符，一个表示输入设备，一个表示输出设备。与sendfile不同的是，splice允许任意两个文件互相连接，而并不只是文件与socket进行数据传输。对于从一个文件描述符发送数据到socket这种特例来说，一直都是使用sendfile系统调用，而splice一直以来就只是一种机制，它并不仅限于sendfile的功能。也就是说 sendfile 是 splice 的一个子集。同时也不需要上下文切换。
+
+在 Linux 2.6.17 版本引入了 splice，而在 Linux 2.6.23 版本中， sendfile 机制的实现已经没有了，但是其 API 及相应的功能还在，只不过 API 及相应的功能是利用了 splice 机制来实现的。和 sendfile 不同的是，splice 不需要硬件支持。
+
+#### Broker性能
 1. 日志记录批处理
 顺序 I/O 在大多数的存储介质上都非常快，几乎可以和网络 I/O 的峰值性能相媲美。在实践中，这意味着一个设计良好的日志结构的持久层将可以紧随网络流量的速度。事实上，Kafka 的瓶颈通常是网络而非磁盘。因此，除了由操作系统提供的底层批处理能力之外，Kafka 的 Clients 和 Brokers 会把多条读写的日志记录合并成一个批次，然后才通过网络发送出去。日志记录的批处理通过使用更大的包以及提高带宽效率来摊薄网络往返的开销。
 2. 批量压缩
@@ -122,12 +161,12 @@ https://blog.csdn.net/jiang_wang01/article/details/123238018
 3. 非强制刷新缓冲写操作
 另一个助力 Kafka 高性能、同时也是一个值得更进一步去探究的底层原因：Kafka 在确认写成功 ACK 之前的磁盘写操作不会真正调用 fsync 命令；通常只需要确保日志记录被写入到 I/O Buffer 里就可以给 Client 回复 ACK 信号。这是一个鲜为人知却至关重要的事实：事实上，这正是让 Kafka 能表现得如同一个内存型消息队列的原因 —— 因为 Kafka 是一个基于磁盘的内存型消息队列 (受缓冲区/页面缓存大小的限制)。
 
-##### 流数据并行
+#### 流数据并行
 1. Topic 的分区方案。应该对 Topics 进行分区，以最大限度地增加独立子事件流的数量。换句话说，日志记录的顺序应该只保留在绝对必要的地方。如果任意两个日志记录在某种意义上没有合理的关联，那它们就不应该被绑定到同一个分区。这暗示你要使用不同的键值，因为 Kafka 将使用日志记录的键值作为一个散列源来派生其一致的分区映射。
 2. 一个组里的 Consumers 数量。你可以增加 Consumer Group 里的 Consumer 数量来均衡入站的日志记录的负载，这个数量的上限是 Topic 的分区数量。(如果你愿意的话，你当然可以增加更多的 Consumers ，不过分区计数将会设置一个上限来确保每一个活跃的 Consumer 至少被指派到一个分区，多出来的 Consumers 将会一直保持在一个空闲的状态。) 请注意， Consumer 可以是进程或线程。依据 Consumer 执行的工作负载类型，你可以在线程池中使用多个独立的 Consumer 线程或进程记录。
 
 ### Kafka如何保证消息不丢失、不重复消费
-##### 消息发送
+#### 消息发送
 Kafka消息发送有两种方式：同步（sync）和异步（async），默认是同步方式，可通过producer.type属性进行配置。Kafka通过配置request.required.acks属性来确认消息的生产：
 0---表示不进行消息接收是否成功的确认；
 1---表示当Leader接收成功时确认；
@@ -139,7 +178,7 @@ Kafka消息发送有两种方式：同步（sync）和异步（async），默认
 解决方案：
 同步模式下，确认机制设置为-1，即让消息写入Leader和Follower之后再确认消息发送成功；
 异步模式下，为防止缓冲区满，可以在配置文件设置不限制阻塞超时时间，当缓冲区满时让生产者一直处于阻塞状态；
-##### 消息消费
+#### 消息消费
 Kafka消息消费有两个consumer接口，Low-level API和High-level API：
 Low-level API：消费者自己维护offset等值，可以实现对Kafka的完全控制；
 High-level API：封装了对parition和offset的管理，使用简单；
