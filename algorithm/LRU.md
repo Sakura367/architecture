@@ -1,56 +1,58 @@
 ### Go实现
 ```
+package lru
+
 type LRUNode struct {
-	key  string
-	val  string
-	prev *LRUNode
-	next *LRUNode
+    key string
+    val string
+    prev *LRUNode
+    next *LRUNode
 }
 
-func InitLRUNode(k string, v string) *LRUNode {
-	node := new(LRUNode)
-	node.key = k
-	node.val = v
-	return node
+func InitLRUNode(k, v string) *LRUNode {
+    return &LRUNode{
+        key: k,
+        val: v,
+    }
 }
 
 type LRUList struct {
-	size int
-	head *LRUNode
-	tail *LRUNode
+    head *LRUNode
+    tail *LRUNode
+    size int
 }
 
 func InitLRUList() *LRUList {
-	list := new(LRUList)
-	list.head = new(LRUNode)
-	list.tail = new(LRUNode)
-	list.head.next = list.tail
-	list.tail.prev = list.head
-	list.size = 0
-	return list
+    h, t := new(LRUNode), new(LRUNode)
+    h.next = t
+    t.prev = h
+    return &LRUList{
+        head: h,
+        tail: t,
+    }
 }
 
 func (list *LRUList) addLast(node *LRUNode) {
-	node.prev = list.tail.prev
-	node.next = list.tail
-	list.tail.prev.next = node
-	list.tail.prev = node
-	list.size++
+    node.prev = list.tail.prev
+    node.next = list.tail
+    list.tail.prev.next = node
+    list.tail.prev = node
+    list.size++
 }
 
 func (list *LRUList) remove(node *LRUNode) {
-	node.prev.next = node.next
-	node.next.prev = node.prev
-	list.size--
+    node.prev.next = node.next
+    node.next.prev = node.prev
+    list.size--
 }
 
 func (list *LRUList) removeFirst() *LRUNode {
-	if list.head.next == list.tail {
-		return nil
-	}
-	node := list.head.next
-	list.remove(node)
-	return node
+    if list.head.next == list.tail {
+        return nil
+    }
+    node := list.head.next
+    list.remove(node)
+    return node
 }
 
 func (list *LRUList) Size() int {
@@ -58,64 +60,54 @@ func (list *LRUList) Size() int {
 }
 
 type LRUCache struct {
-	data     *LRUList
-	hash     map[string]*LRUNode
-	capacity int
+    data *LRUList
+    hash map[string]*LRUNode
+    capacity int
 }
 
 func InitLRUCache(c int) *LRUCache {
-	lru := new(LRUCache)
-	list := InitLRUList()
-	lru.data = list
-	lru.hash = make(map[string]*LRUNode)
-	lru.capacity = c
-	return lru
+    d, h := InitLRUList(), make(map[string]*LRUNode)
+    return &LRUCache{
+        data: d,
+        hash: h,
+        capacity: c,
+    }
 }
 
 func (lru *LRUCache) refresh(k string) {
-	node, _ := lru.hash[k]
-	lru.data.remove(node)
-	lru.data.addLast(node)
-}
-
-func (lru *LRUCache) add(k string, v string) {
-	node := InitLRUNode(k, v)
-	lru.data.addLast(node)
-	lru.hash[k] = node
-}
-
-func (lru *LRUCache) remove(k string) {
-	node, ok := lru.hash[k]
-	if !ok {
-		return
-	}
-	lru.data.remove(node)
-	delete(lru.hash, k)
+    node, _ := lru.hash[k]
+    lru.data.remove(node)
+    lru.data.addLast(node)
 }
 
 func (lru *LRUCache) removeFirst() {
-	node := lru.data.removeFirst()
-	delete(lru.hash, node.key)
+    node := lru.data.removeFirst()
+    delete(lru.hash, node.key)
 }
 
-func (lru *LRUCache) Get(k string) *LRUNode {
-	if _, ok := lru.hash[k]; !ok {
-		return nil
-	}
-	lru.refresh(k)
-	return lru.hash[k]
+func (lru *LRUCache) put(k, v string) {
+    if node, ok := lru.hash[k]; ok {
+        lru.data.remove(node)
+        delete(lru.hash, node.key)
+    }
+    node := InitLRUNode(k, v)
+    lru.data.addLast(node)
+    lru.hash[k] = node
 }
 
-func (lru *LRUCache) Put(k string, v string) {
-	if _, ok := lru.hash[k]; ok {
-		lru.remove(k)
-		lru.add(k, v)
-		return
-	}
-	if lru.capacity == lru.data.Size() {
-		lru.removeFirst()
-	}
-	lru.add(k, v)
+func (lru *LRUCache) Get(k string) string {
+    if _, ok := lru.hash[k]; !ok {
+        return ""
+    }
+    lru.refresh(k)
+    return lru.hash[k].val
+}
+
+func (lru *LRUCache) Put(k, v string) {
+    if lru.capacity == lru.data.Size() {
+        lru.removeFirst()
+    }
+    lru.put(k, v)
 }
 
 func Test_LRU(t *testing.T) {
